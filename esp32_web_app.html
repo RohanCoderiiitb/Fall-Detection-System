@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ESP32 Multi-Device Monitor</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { font-family: "Inter", sans-serif; }
+  </style>
+</head>
+<body class="bg-gray-900 text-white min-h-screen p-4 md:p-8">
+  <div class="max-w-5xl mx-auto">
+    <header class="text-center mb-8">
+      <h1 class="text-3xl md:text-4xl font-bold text-blue-400">
+        ESP32 Multi-Device Monitor
+      </h1>
+      <p class="text-lg text-gray-400">Health + Location Data Aggregator</p>
+    </header>
+
+    <div
+      class="grid md:grid-cols-2 gap-6 bg-gray-800 p-6 rounded-lg shadow-lg mb-8"
+    >
+      <div>
+        <h2 class="text-2xl font-semibold mb-4 text-center">Health Monitor</h2>
+        <button
+          id="connectHealthButton"
+          class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-lg transition duration-300"
+        >
+          Connect Health Node
+        </button>
+        <p id="healthStatusLabel" class="mt-4 text-gray-400 text-center">
+          Status: Disconnected
+        </p>
+      </div>
+      <div>
+        <h2 class="text-2xl font-semibold mb-4 text-center">
+          Location/Fall Monitor
+        </h2>
+        <button
+          id="connectLocationButton"
+          class="w-full bg-purple-600 hover:bg-purple-700 text-white font-bold py-3 px-6 rounded-lg transition duration-300"
+        >
+          Connect Location Node
+        </button>
+        <p id="locationStatusLabel" class="mt-4 text-gray-400 text-center">
+          Status: Disconnected
+        </p>
+      </div>
+    </div>
+
+    <div class="grid md:grid-cols-2 gap-8">
+      <!-- Health Data -->
+      <div class="bg-gray-800 p-6 rounded-lg shadow-lg">
+        <h2 class="text-2xl font-semibold mb-4 text-blue-400">
+          Health Data (ESP32 → Firebase)
+        </h2>
+        <p class="text-gray-400 mb-2">Live Data:</p>
+        <div
+          id="healthDataLabel"
+          class="w-full p-4 rounded-md bg-gray-700 text-green-300 font-mono h-32 overflow-auto"
+        >
+          Waiting for data...
+        </div>
+        <p class="text-gray-400 mt-4 mb-2">Firebase Upload Log:</p>
+        <div
+          id="healthFirebaseLog"
+          class="w-full p-4 rounded-md bg-gray-900 text-gray-400 font-mono h-32 overflow-y-scroll text-sm"
+        >
+          Awaiting uploads...
+        </div>
+      </div>
+
+      <!-- Location Data -->
+      <div class="bg-gray-800 p-6 rounded-lg shadow-lg">
+        <h2 class="text-2xl font-semibold mb-4 text-purple-400">
+          Location Data (ESP32 → Firebase)
+        </h2>
+        <p class="text-gray-400 mb-2">Live Data:</p>
+        <div
+          id="locationDataLabel"
+          class="w-full p-4 rounded-md bg-gray-700 text-green-300 font-mono h-32 overflow-auto"
+        >
+          Waiting for data...
+        </div>
+        <p class="text-gray-400 mt-4 mb-2">Firebase Upload Log:</p>
+        <div
+          id="locationFirebaseLog"
+          class="w-full p-4 rounded-md bg-gray-900 text-gray-400 font-mono h-32 overflow-y-scroll text-sm"
+        >
+          Awaiting uploads...
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    // --- Firebase URLs ---
+    const FB_BASE_URL =
+      "https://esp32healthmonitor-4a227-default-rtdb.firebaseio.com/";
+    const FB_HEALTH_URL = `${FB_BASE_URL}/health.json`;
+    const FB_LOCATION_URL = `${FB_BASE_URL}/location.json`;
+    const FB_FALL_ALERT_URL = `${FB_BASE_URL}/fall_alerts.json`;
+
+    // --- BLE UUIDs ---
+    const UART_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+    const CHAR_UUID_TX = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+
+    const textDecoder = new TextDecoder("utf-8");
+
+    // --- Device Configs ---
+    const healthDevice = {
+      name: "Health Node",
+      device: null,
+      txChar: null,
+      filterService: UART_SERVICE_UUID,
+      connectButton: document.getElementById("connectHealthButton"),
+      statusLabel: document.getElementById("healthStatusLabel"),
+      dataLabel: document.getElementById("healthDataLabel"),
+      logElement: document.getElementById("healthFirebaseLog"),
+      notificationHandler: handleHealthNotifications,
+      disconnectHandler: () => onDisconnected(healthDevice),
+    };
+
+    const locationDevice = {
+      name: "Location Node",
+      device: null,
+      txChar: null,
+      filterService: UART_SERVICE_UUID,
+      connectButton: document.getElementById("connectLocationButton"),
+      statusLabel: document.getElementById("locationStatusLabel"),
+      dataLabel: document.getElementById("locationDataLabel"),
+      logElement: document.getElementById("locationFirebaseLog"),
+      notificationHandler: handleLocationNotifications,
+      disconnectHandler: () => onDisconnected(locationDevice),
+    };
+
+    // --- Event Listeners ---
+    healthDevice.connectButton.addEventListener("click", () =>
+      connectToBLE(healthDevice)
+    );
+    locationDevice.connectButton.addEventListener("click", () =>
+      connectToBLE(locationDevice)
+    );
+
+    // --- BLE Connect ---
+    async function connectToBLE(deviceConfig) {
+      try {
+        logStatus(`Scanning for ${deviceConfig.name}...`, deviceConfig);
+        const bleDevice = await navigator.bluetooth.requestDevice({
+          filters: [
+            {
+              namePrefix: deviceConfig.name.includes("Health")
+                ? "ESP32_Health"
+                : "ESP32_Location",
+            },
+          ],
+          optionalServices: [deviceConfig.filterService],
+        });
+
+        deviceConfig.device = bleDevice;
+        deviceConfig.device.addEventListener(
+          "gattserverdisconnected",
+          deviceConfig.disconnectHandler
+        );
+
+        logStatus("Connecting to GATT Server...", deviceConfig);
+        const server = await deviceConfig.device.gatt.connect();
+
+        const service = await server.getPrimaryService(
+          deviceConfig.filterService
+        );
+        const tx = await service.getCharacteristic(CHAR_UUID_TX);
+        await tx.startNotifications();
+        tx.addEventListener(
+          "characteristicvaluechanged",
+          deviceConfig.notificationHandler
+        );
+        deviceConfig.txChar = tx;
+
+        logStatus("Connected!", deviceConfig);
+        deviceConfig.connectButton.textContent = "Disconnect";
+        deviceConfig.connectButton.onclick = () => disconnectBLE(deviceConfig);
+      } catch (e) {
+        logStatus(`Error: ${e.message}`, deviceConfig);
+      }
+    }
+
+    // --- HEALTH HANDLER (with timestamp) ---
+    function handleHealthNotifications(event) {
+      const dataString = textDecoder.decode(event.target.value);
+      console.log("Health Data Raw:", dataString);
+
+      try {
+        const jsonData = JSON.parse(dataString);
+        const timestamp = new Date().toISOString();
+        jsonData.timestamp = timestamp; // attach timestamp
+
+        // Display in UI with timestamp
+        healthDevice.dataLabel.innerHTML = `
+          <div><strong>Status:</strong> ${jsonData.status}</div>
+          <div><strong>Avg BPM:</strong> ${jsonData.avg_bpm}</div>
+          <div><strong>Heartbeat:</strong> ${jsonData.heartbeat}</div>
+          <div><strong>Fall Risk:</strong> ${jsonData.fall_risk}</div>
+          <div class="text-gray-400 text-sm mt-1"><strong>Time:</strong> ${new Date(timestamp).toLocaleTimeString()}</div>
+        `;
+
+        // Upload to Firebase with timestamp
+        postToFirebase(FB_HEALTH_URL, jsonData, healthDevice);
+      } catch (err) {
+        logFirebase(`Parse Error: ${dataString}`, healthDevice);
+      }
+    }
+
+    // --- LOCATION HANDLER ---
+    function handleLocationNotifications(event) {
+      const dataString = textDecoder.decode(event.target.value);
+      console.log("Location Data Raw:", dataString);
+      locationDevice.dataLabel.textContent = dataString;
+
+      try {
+        const jsonData = JSON.parse(dataString);
+        const timestamp = new Date().toISOString();
+
+        if (jsonData.fall_detected === true) {
+          logFirebase("⚠️ FALL DETECTED!", locationDevice);
+          postToFirebase(
+            FB_FALL_ALERT_URL,
+            { ...jsonData, timestamp },
+            locationDevice
+          );
+        } else {
+          postToFirebase(
+            FB_LOCATION_URL,
+            { ...jsonData, timestamp },
+            locationDevice
+          );
+        }
+      } catch (e) {
+        logFirebase(`Parse Error: ${dataString}`, locationDevice);
+      }
+    }
+
+    // --- Firebase Upload ---
+    async function postToFirebase(url, data, deviceConfig) {
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(data),
+        });
+        logFirebase(
+          res.ok
+            ? `Success → ${JSON.stringify(data)}`
+            : `Error → ${res.status}`,
+          deviceConfig
+        );
+      } catch (e) {
+        logFirebase(`Network Error: ${e.message}`, deviceConfig);
+      }
+    }
+
+    // --- Disconnect Handling ---
+    function onDisconnected(deviceConfig) {
+      logStatus("Device Disconnected.", deviceConfig);
+      deviceConfig.device = null;
+      deviceConfig.txChar = null;
+      deviceConfig.connectButton.textContent = `Connect ${deviceConfig.name}`;
+      deviceConfig.connectButton.onclick = () => connectToBLE(deviceConfig);
+    }
+
+    function disconnectBLE(deviceConfig) {
+      if (deviceConfig.device?.gatt.connected)
+        deviceConfig.device.gatt.disconnect();
+      else onDisconnected(deviceConfig);
+    }
+
+    // --- Logging ---
+    function logStatus(msg, cfg) {
+      if (cfg) cfg.statusLabel.textContent = `Status: ${msg}`;
+      console.log(`[${cfg?.name ?? "System"}] ${msg}`);
+    }
+
+    function logFirebase(msg, cfg) {
+      if (cfg)
+        cfg.logElement.innerHTML =
+          `${new Date().toLocaleTimeString()}: ${msg}\n` +
+          cfg.logElement.innerHTML;
+    }
+  </script>
+</body>
+</html>
