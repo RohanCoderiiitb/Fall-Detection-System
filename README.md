@@ -106,11 +106,6 @@ GPS integration, fall detection, and cloud sync demonstrated successful end-to-e
 
 ---
 
-## 🎥 Demo Video
-(Add your demo link here)
-
----
-
 ## 👥 Team
 - Amitaash Rao  
 - Gaurav Nayak  
@@ -118,8 +113,3 @@ GPS integration, fall detection, and cloud sync demonstrated successful end-to-e
 - Nirmeet Udeshi  
 - Prashant VSG  
 - Rohan Kamath  
-
----
-
-## 📜 License
-Add a LICENSE file if you want to allow reuse.
